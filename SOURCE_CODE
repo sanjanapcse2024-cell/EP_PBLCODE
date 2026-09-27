@@ -1,0 +1,112 @@
+// ============================================
+// IoT Home Energy Monitor — ESP32 + PZEM-004T
+// Sends data to Firebase Realtime Database
+// ============================================
+
+#include <WiFi.h>
+#include <FirebaseESP32.h>
+#include <PZEM004Tv30.h>
+
+// ─── WiFi Credentials ───────────────────────
+#define WIFI_SSID     "JioFiber-4G"
+#define WIFI_PASSWORD "prema@1005"
+
+// ─── Firebase Credentials ───────────────────
+#define FIREBASE_HOST "home-energy-monitor-ffa1f-default-rtdb.asia-southeast1.firebasedatabase.app"
+#define FIREBASE_AUTH "p799xx0JNBxfGUC3z3wLXQJXxIvYLc01jvUJyibJ"
+
+// ─── PZEM UART Pins ─────────────────────────
+#define PZEM_RX_PIN 16   // ESP32 GPIO16 ← PZEM TX
+#define PZEM_TX_PIN 17   // ESP32 GPIO17 → PZEM RX
+
+// ─── TNEB Tariff (Rs per unit) ──────────────
+#define TARIFF 8.0       // Rs 8 per kWh (adjust if needed)
+
+// ─── Objects ────────────────────────────────
+PZEM004Tv30 pzem(Serial2, PZEM_RX_PIN, PZEM_TX_PIN);
+FirebaseData firebaseData;
+FirebaseConfig config;
+FirebaseAuth auth;
+
+// ─── Variables ──────────────────────────────
+unsigned long lastSendTime = 0;
+const long sendInterval = 3000; // Send every 3 seconds
+
+// ============================================
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Starting IoT Energy Monitor...");
+
+  // Connect to WiFi
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi Connected!");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  // Configure Firebase
+  config.host = FIREBASE_HOST;
+  config.signer.tokens.legacy_token = FIREBASE_AUTH;
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+  Serial.println("Firebase Connected!");
+}
+
+// ============================================
+void loop() {
+  unsigned long currentTime = millis();
+
+  if (currentTime - lastSendTime >= sendInterval) {
+    lastSendTime = currentTime;
+
+    // Read PZEM sensor values
+    float voltage    = pzem.voltage();
+    float current    = pzem.current();
+    float power      = pzem.power();
+    float energy     = pzem.energy();    // kWh
+    float frequency  = pzem.frequency();
+    float powerFactor = pzem.pf();
+
+    // Check for NaN (sensor not responding)
+    if (isnan(voltage)) {
+      Serial.println("ERROR: PZEM not responding. Check wiring.");
+      return;
+    }
+
+    // Calculate cost
+    float cost = energy * TARIFF;
+
+    // Print to Serial Monitor
+    Serial.println("──────────────────────────");
+    Serial.print("Voltage    : "); Serial.print(voltage);    Serial.println(" V");
+    Serial.print("Current    : "); Serial.print(current);    Serial.println(" A");
+    Serial.print("Power      : "); Serial.print(power);      Serial.println(" W");
+    Serial.print("Energy     : "); Serial.print(energy);     Serial.println(" kWh");
+    Serial.print("Frequency  : "); Serial.print(frequency);  Serial.println(" Hz");
+    Serial.print("Power Factor: "); Serial.println(powerFactor);
+    Serial.print("Cost (Rs)  : "); Serial.println(cost);
+    Serial.println("──────────────────────────");
+
+    // Send to Firebase
+    String path = "/appliances/bulb/";
+
+    Firebase.setFloat(firebaseData, path + "voltage_V",     voltage);
+    Firebase.setFloat(firebaseData, path + "current_A",     current);
+    Firebase.setFloat(firebaseData, path + "power_W",       power);
+    Firebase.setFloat(firebaseData, path + "energy_kWh",    energy);
+    Firebase.setFloat(firebaseData, path + "frequency_Hz",  frequency);
+    Firebase.setFloat(firebaseData, path + "power_factor",  powerFactor);
+    Firebase.setFloat(firebaseData, path + "cost_Rs",       cost);
+
+    // Check Firebase push status
+    if (firebaseData.httpCode() == 200) {
+      Serial.println("Firebase: Data sent successfully ✓");
+    } else {
+      Serial.println("Firebase ERROR: " + firebaseData.errorReason());
+    }
+  }
+}
